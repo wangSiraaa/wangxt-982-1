@@ -201,7 +201,53 @@ export async function initDatabase(): Promise<void> {
       to_room_id TEXT NOT NULL,
       reason TEXT,
       operator_id TEXT NOT NULL,
+      trigger_type TEXT DEFAULT 'manual',
+      resource_diff TEXT,
+      from_snapshot_id TEXT,
+      to_snapshot_id TEXT,
       timestamp TEXT DEFAULT (datetime('now'))
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE resource_snapshots (
+      id TEXT PRIMARY KEY,
+      booking_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      room_name TEXT,
+      room_capacity INTEGER,
+      room_floor TEXT,
+      room_cost_per_hour REAL,
+      setup_buffer_minutes INTEGER,
+      equipment_ids TEXT,
+      equipment_names TEXT,
+      cost_center_id TEXT,
+      cost_center_name TEXT,
+      has_visitors INTEGER DEFAULT 0,
+      visitor_count INTEGER DEFAULT 0,
+      tea_break_needed INTEGER DEFAULT 0,
+      meeting_level TEXT,
+      attendee_count INTEGER,
+      snapshot_type TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE conflict_details (
+      id TEXT PRIMARY KEY,
+      booking_id TEXT,
+      conflict_type TEXT NOT NULL,
+      severity TEXT DEFAULT 'error',
+      title TEXT NOT NULL,
+      description TEXT,
+      related_booking_id TEXT,
+      related_resource_id TEXT,
+      related_resource_type TEXT,
+      overlap_start TEXT,
+      overlap_end TEXT,
+      resolution_suggestion TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
     );
   `)
 
@@ -222,6 +268,10 @@ export async function initDatabase(): Promise<void> {
   db.run(`CREATE INDEX idx_visitors_booking ON visitors(booking_id);`)
   db.run(`CREATE INDEX idx_equipment_status ON equipment(status);`)
   db.run(`CREATE INDEX idx_booking_logs_booking ON booking_logs(booking_id);`)
+  db.run(`CREATE INDEX idx_swap_history_booking ON swap_history(booking_id);`)
+  db.run(`CREATE INDEX idx_resource_snapshots_booking ON resource_snapshots(booking_id);`)
+  db.run(`CREATE INDEX idx_conflict_details_booking ON conflict_details(booking_id);`)
+  db.run(`CREATE INDEX idx_conflict_details_type ON conflict_details(conflict_type);`)
 
   seedData()
 }

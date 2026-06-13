@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
-import { Check, X, ArrowRightLeft, Crown, AlertTriangle } from 'lucide-react'
-import { format, parseISO } from 'date-fns'
-import { useStore, apiPost, apiFetch, type Booking, type Room } from '@/store'
+import { Check, X, ArrowRightLeft, Crown, AlertTriangle, Users, MapPin, DollarSign, Clock, Monitor, History, Lightbulb, ChevronDown, ChevronRight, ArrowRight, RefreshCw } from 'lucide-react'
+import { format, parseISO, differenceInMinutes } from 'date-fns'
+import { useStore, apiPost, apiFetch, type Booking, type Room, type ConflictDetail, type ResourceDiff } from '@/store'
 
 type TabKey = 'pending' | 'conflict' | 'vip' | 'swap'
 
@@ -215,6 +215,82 @@ function VipPreemptTab() {
   )
 }
 
+function ResourceDiffView({ diff }: { diff: ResourceDiff }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-700">整体匹配度</span>
+        <div className="flex items-center gap-2">
+          <div className="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full ${diff.overallMatchScore >= 80 ? 'bg-green-500' : diff.overallMatchScore >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}
+              style={{ width: `${diff.overallMatchScore}%` }}
+            />
+          </div>
+          <span className={`text-sm font-bold ${diff.overallMatchScore >= 80 ? 'text-green-600' : diff.overallMatchScore >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
+            {diff.overallMatchScore}%
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">容量变化</div>
+          <div className="font-medium text-slate-700">
+            {diff.room.capacity.before} → {diff.room.capacity.after}
+            {diff.room.capacity.changed && (
+              <span className={`ml-1 text-xs ${diff.room.capacity.diff > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                ({diff.room.capacity.diff > 0 ? '+' : ''}{diff.room.capacity.diff})
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">楼层变化</div>
+          <div className="font-medium text-slate-700">
+            {diff.room.floor.before} → {diff.room.floor.after}层
+          </div>
+        </div>
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">费用变化</div>
+          <div className={`font-medium ${diff.cost.totalCost.diff > 0 ? 'text-red-600' : diff.cost.totalCost.diff < 0 ? 'text-green-600' : 'text-slate-700'}`}>
+            ¥{diff.cost.totalCost.before} → ¥{diff.cost.totalCost.after}
+            {diff.cost.totalCost.changed && (
+              <span className="text-xs ml-1">
+                ({diff.cost.totalCost.diff > 0 ? '+' : ''}¥{diff.cost.totalCost.diff})
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {diff.equipment.changed && (
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-2">设备变化</div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {diff.equipment.added.length > 0 && (
+              <div className="flex items-center gap-1">
+                <span className="text-green-600">新增:</span>
+                {diff.equipment.added.map((e, i) => (
+                  <span key={i} className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded">{e}</span>
+                ))}
+              </div>
+            )}
+            {diff.equipment.removed.length > 0 && (
+              <div className="flex items-center gap-1">
+                <span className="text-red-600">减少:</span>
+                {diff.equipment.removed.map((e, i) => (
+                  <span key={i} className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded">{e}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SwapTab() {
   const bookings = useStore((s) => s.bookings)
   const rooms = useStore((s) => s.rooms)
@@ -224,17 +300,49 @@ function SwapTab() {
   const fetchBookings = useStore((s) => s.fetchBookings)
 
   const [selectedBookingId, setSelectedBookingId] = useState('')
-  const [suggestions, setSuggestions] = useState<Room[]>([])
+  const [suggestions, setSuggestions] = useState<any[]>([])
   const [loadingSuggestions, setLoadingSuggestions] = useState(false)
+  const [swapHistory, setSwapHistory] = useState<any[]>([])
+  const [resourceSnapshots, setResourceSnapshots] = useState<any[]>([])
+  const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null)
+  const [swapReason, setSwapReason] = useState('')
 
   const activeBookings = bookings.filter((b) => !['cancelled', 'rejected'].includes(b.status))
+
+  const selectedBooking = useMemo(() =>
+    bookings.find(b => b.id === selectedBookingId),
+    [bookings, selectedBookingId]
+  )
+
+  const selectedRoom = useMemo(() =>
+    rooms.find(r => r.id === selectedBooking?.room_id),
+    [rooms, selectedBooking]
+  )
+
+  const selectedSuggestionRoom = useMemo(() =>
+    rooms.find(r => r.id === selectedSuggestion),
+    [rooms, selectedSuggestion]
+  )
+
+  const loadSwapHistory = async (bookingId: string) => {
+    try {
+      const history = await apiFetch<any[]>(`/api/bookings/${bookingId}/swap-history`)
+      setSwapHistory(history)
+      const snapshots = await apiFetch<any[]>(`/api/bookings/${bookingId}/resource-snapshots`)
+      setResourceSnapshots(snapshots)
+    } catch (err: any) {
+      console.error('加载迁移历史失败:', err)
+    }
+  }
 
   async function handleSuggest() {
     if (!selectedBookingId) return
     setLoadingSuggestions(true)
     try {
-      const data = await apiPost<Room[]>('/api/bookings/suggest-swap', { bookingId: selectedBookingId })
+      const data = await apiPost<any[]>('/api/bookings/suggest-swap', { bookingId: selectedBookingId })
       setSuggestions(data)
+      setSelectedSuggestion(null)
+      loadSwapHistory(selectedBookingId)
     } catch (err: any) {
       addNotification(err.message, 'error')
     } finally {
@@ -243,16 +351,19 @@ function SwapTab() {
   }
 
   async function handleSwap(targetRoomId: string) {
+    const reason = swapReason || '手动换房'
     try {
       await apiPost('/api/bookings/swap-room', {
         bookingId: selectedBookingId,
         targetRoomId,
         operatorId: currentUser?.id,
-        reason: '手动换房',
+        reason,
+        triggerType: 'manual',
       })
       addNotification('换房成功', 'success')
-      setSelectedBookingId('')
-      setSuggestions([])
+      setSwapReason('')
+      setSelectedSuggestion(null)
+      handleSuggest()
       fetchBookings({ date: format(new Date(), 'yyyy-MM-dd') })
     } catch (err: any) {
       addNotification(err.message, 'error')
@@ -269,32 +380,182 @@ function SwapTab() {
         <div className="flex gap-3 items-end">
           <div className="flex-1">
             <label className="block text-sm text-slate-600 mb-1">选择预订</label>
-            <select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={selectedBookingId} onChange={(e) => setSelectedBookingId(e.target.value)}>
+            <select
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
+              value={selectedBookingId}
+              onChange={(e) => {
+                setSelectedBookingId(e.target.value)
+                setSuggestions([])
+                setSwapHistory([])
+                setResourceSnapshots([])
+                setSelectedSuggestion(null)
+              }}
+            >
               <option value="">请选择</option>
               {activeBookings.map((b) => (
-                <option key={b.id} value={b.id}>{b.title} ({b.start_time})</option>
+                <option key={b.id} value={b.id}>
+                  {b.title} ({format(parseISO(b.start_time), 'MM/dd HH:mm')})
+                </option>
               ))}
             </select>
           </div>
-          <button onClick={handleSuggest} disabled={!selectedBookingId || loadingSuggestions} className="px-4 py-2 bg-teal-700 text-white rounded-lg text-sm hover:bg-teal-800 disabled:opacity-50">
-            查询可用房间
+          <button
+            onClick={handleSuggest}
+            disabled={!selectedBookingId || loadingSuggestions}
+            className="px-4 py-2 bg-teal-700 text-white rounded-lg text-sm hover:bg-teal-800 disabled:opacity-50 flex items-center gap-1"
+          >
+            {loadingSuggestions ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Lightbulb className="w-4 h-4" />}
+            智能推荐
           </button>
         </div>
       </div>
 
-      {suggestions.length > 0 && (
-        <div className="grid grid-cols-2 gap-3">
-          {suggestions.map((r) => (
-            <div key={r.id} className="bg-white rounded-lg border border-slate-200 p-4 flex items-center justify-between">
-              <div>
-                <div className="font-medium text-sm text-slate-800">{r.name}</div>
-                <div className="text-xs text-slate-500">{r.capacity}人 · {r.floor}层 · ¥{r.cost_per_hour}/时</div>
+      {selectedBooking && selectedRoom && (
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-white rounded-lg border border-slate-200 p-4">
+            <div className="text-xs text-slate-500 mb-2">当前房间</div>
+            <div className="font-medium text-slate-800 mb-2">{selectedRoom.name}</div>
+            <div className="text-sm text-slate-600 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-slate-400" />
+                <span>{selectedRoom.capacity}人</span>
               </div>
-              <button onClick={() => handleSwap(r.id)} className="flex items-center gap-1 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700">
-                <ArrowRightLeft className="w-4 h-4" /> 换到此处
-              </button>
+              <div className="flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                <span>{selectedRoom.floor}层</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <DollarSign className="w-3.5 h-3.5 text-slate-400" />
+                <span>¥{selectedRoom.cost_per_hour}/时</span>
+              </div>
             </div>
-          ))}
+          </div>
+
+          {selectedSuggestionRoom ? (
+            <div className="bg-white rounded-lg border border-teal-300 bg-teal-50/30 p-4">
+              <div className="text-xs text-teal-600 mb-2">目标房间</div>
+              <div className="font-medium text-slate-800 mb-2">{selectedSuggestionRoom.name}</div>
+              <div className="text-sm text-slate-600 space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-slate-400" />
+                  <span>{selectedSuggestionRoom.capacity}人</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                  <span>{selectedSuggestionRoom.floor}层</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <DollarSign className="w-3.5 h-3.5 text-slate-400" />
+                  <span>¥{selectedSuggestionRoom.cost_per_hour}/时</span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-slate-50 rounded-lg border-2 border-dashed border-slate-200 p-4 flex items-center justify-center">
+              <span className="text-sm text-slate-400">选择下方推荐房间查看对比</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div className="bg-white rounded-lg border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">
+            <Lightbulb className="w-4 h-4 text-amber-500" />
+            推荐替代房间
+            <span className="text-xs font-normal text-slate-500">（共 {suggestions.length} 个）</span>
+          </h3>
+
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {suggestions.map((room) => (
+              <div
+                key={room.id}
+                className={`rounded-lg border p-3 cursor-pointer transition-all ${
+                  selectedSuggestion === room.id
+                    ? 'border-teal-400 bg-teal-50 ring-2 ring-teal-100'
+                    : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                }`}
+                onClick={() => setSelectedSuggestion(selectedSuggestion === room.id ? null : room.id)}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm text-slate-800">{room.name}</span>
+                      {room.matchScore !== undefined && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${
+                          room.matchScore >= 80 ? 'bg-green-100 text-green-700' :
+                          room.matchScore >= 60 ? 'bg-amber-100 text-amber-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          匹配度 {room.matchScore}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      {room.capacity}人 · {room.floor}层 · ¥{room.cost_per_hour}/时
+                    </div>
+                    {room.matchReasons && room.matchReasons.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {room.matchReasons.map((r: string, i: number) => (
+                          <span key={i} className="text-[10px] px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded">
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleSwap(room.id)
+                    }}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs hover:bg-amber-700 shrink-0 ml-3"
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5" />
+                    换到此处
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {swapHistory.length > 0 && (
+        <div className="bg-white rounded-lg border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">
+            <History className="w-4 h-4 text-slate-500" />
+            迁移历史
+            <span className="text-xs font-normal text-slate-500">（共 {swapHistory.length} 次）</span>
+          </h3>
+
+          <div className="space-y-2">
+            {swapHistory.map((h, i) => (
+              <div key={i} className="p-3 bg-slate-50 rounded-lg">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-slate-700">{h.from_room_name}</span>
+                    <ArrowRight className="w-4 h-4 text-slate-400" />
+                    <span className="font-medium text-slate-700">{h.to_room_name}</span>
+                  </div>
+                  <span className="text-xs text-slate-500">
+                    {format(parseISO(h.timestamp), 'MM/dd HH:mm')}
+                  </span>
+                </div>
+                {h.reason && (
+                  <div className="text-xs text-slate-500 mt-1">原因: {h.reason}</div>
+                )}
+                {h.trigger_type && (
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    触发: {h.trigger_type === 'equipment_fault' ? '设备故障' :
+                           h.trigger_type === 'room_maintenance' ? '会议室维修' :
+                           h.trigger_type === 'temp_requisition' ? '临时征用' :
+                           h.trigger_type === 'no_show' ? '未签到释放' : '手动换房'}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

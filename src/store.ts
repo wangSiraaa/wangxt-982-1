@@ -112,6 +112,42 @@ export interface Notification {
   timestamp: number
 }
 
+export interface ConflictDetail {
+  id: string
+  type: 'time' | 'capacity' | 'equipment' | 'budget' | 'visitor' | 'security' | 'setup_buffer' | 'room_status' | 'approval' | 'equipment_borrow' | 'equipment_maintenance'
+  severity: 'error' | 'warning' | 'info'
+  title: string
+  description: string
+  relatedBookingId?: string
+  relatedResourceId?: string
+  relatedResourceType?: string
+  overlapStart?: string
+  overlapEnd?: string
+  resolutionSuggestion?: string
+}
+
+export interface ResourceDiff {
+  room: {
+    name: { before: string; after: string; changed: boolean }
+    capacity: { before: number; after: number; changed: boolean; diff: number }
+    floor: { before: string; after: string; changed: boolean }
+    costPerHour: { before: number; after: number; changed: boolean; diff: number }
+    setupBuffer: { before: number; after: number; changed: boolean; diff: number }
+  }
+  cost: {
+    totalCost: { before: number; after: number; changed: boolean; diff: number }
+  }
+  equipment: {
+    beforeCount: number
+    afterCount: number
+    added: string[]
+    removed: string[]
+    same: string[]
+    changed: boolean
+  }
+  overallMatchScore: number
+}
+
 interface AppState {
   currentUser: User | null
   currentRole: Role

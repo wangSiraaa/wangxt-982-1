@@ -14,16 +14,20 @@ graph TB
         F --> I["审批引擎"]
         F --> J["签到引擎"]
         F --> K["设备管理引擎"]
+        F --> L["临时迁移引擎"]
     end
     subgraph "数据层"
-        L["SQLite 数据库"] --> M["预订流水表"]
-        L --> N["资源状态表"]
-        L --> O["访客记录表"]
-        L --> P["设备状态表"]
-        L --> Q["变更历史表"]
+        M["SQLite 数据库"] --> N["预订流水表"]
+        M --> O["资源状态表"]
+        M --> P["访客记录表"]
+        M --> Q["设备状态表"]
+        M --> R["变更历史表"]
+        M --> S["资源快照表"]
+        M --> T["冲突详情表"]
+        M --> U["迁移历史表"]
     end
     A -- "HTTP/REST" --> E
-    E --> L
+    E --> M
 ```
 
 ## 2. 技术说明
@@ -67,7 +71,12 @@ graph TB
 - `POST /api/bookings/:id/checkin` - 签到
 - `POST /api/bookings/:id/confirm` - 前台确认
 - `POST /api/bookings/:id/approve` - 审批操作
-- `POST /api/bookings/swap-room` - 临时换房
+- `POST /api/bookings/swap-room` - 临时换房（含资源快照+差异计算）
+- `POST /api/bookings/check-conflicts` - 多维度冲突检测
+- `POST /api/bookings/suggest-swap` - 智能推荐替代房间
+- `POST /api/bookings/:id/validate-effective` - 预订生效验证
+- `GET /api/bookings/:id/swap-history` - 查询迁移历史
+- `GET /api/bookings/:id/resource-snapshots` - 查询资源快照
 
 ### 4.3 访客 API
 - `GET /api/visitors` - 获取访客列表
@@ -190,6 +199,76 @@ interface BookingLog {
   timestamp: string;
   detail: string;
 }
+
+interface ConflictDetail {
+  id: string;
+  type: 'time' | 'capacity' | 'equipment' | 'budget' | 'visitor' | 'security' | 'setup_buffer' | 'room_status' | 'approval' | 'equipment_borrow' | 'equipment_maintenance';
+  severity: 'error' | 'warning' | 'info';
+  title: string;
+  description: string;
+  relatedBookingId?: string;
+  relatedResourceId?: string;
+  relatedResourceType?: string;
+  resolutionSuggestion?: string;
+}
+
+interface ResourceDiff {
+  room: {
+    name: { before: string; after: string; changed: boolean };
+    capacity: { before: number; after: number; changed: boolean; diff: number };
+    floor: { before: string; after: string; changed: boolean };
+    costPerHour: { before: number; after: number; changed: boolean; diff: number };
+    setupBuffer: { before: number; after: number; changed: boolean; diff: number };
+  };
+  cost: { totalCost: { before: number; after: number; changed: boolean; diff: number } };
+  equipment: {
+    beforeCount: number;
+    afterCount: number;
+    added: string[];
+    removed: string[];
+    same: string[];
+    changed: boolean;
+  };
+  overallMatchScore: number;
+}
+
+interface ResourceSnapshot {
+  id: string;
+  bookingId: string;
+  roomId: string;
+  roomName: string;
+  roomCapacity: number;
+  roomFloor: string;
+  roomCostPerHour: number;
+  setupBufferMinutes: number;
+  equipmentIds: string[];
+  equipmentNames: string[];
+  costCenterId: string;
+  costCenterName: string;
+  hasVisitors: boolean;
+  visitorCount: number;
+  teaBreakNeeded: boolean;
+  meetingLevel: string;
+  attendeeCount: number;
+  snapshotType: 'before_swap' | 'after_swap';
+  createdAt: string;
+}
+
+interface SwapRecord {
+  id: string;
+  bookingId: string;
+  fromRoomId: string;
+  toRoomId: string;
+  fromRoomName: string;
+  toRoomName: string;
+  reason: string;
+  operatorId: string;
+  triggerType: 'manual' | 'equipment_fault' | 'room_maintenance' | 'temp_requisition' | 'no_show';
+  resourceDiff: ResourceDiff;
+  fromSnapshotId: string;
+  toSnapshotId: string;
+  timestamp: string;
+}
 ```
 
 ## 5. 服务端架构图
@@ -202,11 +281,19 @@ graph LR
     B --> E["Conflict Engine"]
     B --> F["Approval Engine"]
     B --> G["Checkin Engine"]
-    E --> H["Time Conflict Checker"]
-    E --> I["Setup Buffer Checker"]
-    E --> J["Equipment Checker"]
-    E --> K["Budget Checker"]
-    E --> L["VIP Priority Checker"]
+    B --> H["Migration Engine"]
+    E --> E1["Time Conflict Checker"]
+    E --> E2["Capacity Checker"]
+    E --> E3["Equipment Checker"]
+    E --> E4["Budget Checker"]
+    E --> E5["Setup Buffer Checker"]
+    E --> E6["Visitor FrontDesk Checker"]
+    E --> E7["Approval Requirement Checker"]
+    E --> E8["VIP Priority Checker"]
+    H --> H1["Smart Room Recommender"]
+    H --> H2["Resource Snapshot"]
+    H --> H3["Resource Diff Calculator"]
+    H --> H4["Migration History"]
 ```
 
 ## 6. 数据模型
@@ -220,9 +307,14 @@ erDiagram
     Room ||--o{ RoomSplit : "splits into"
     Booking ||--o{ Visitor : "invites"
     Booking ||--o{ BookingLog : "records"
+    Booking ||--o{ SwapHistory : "has"
+    Booking ||--o{ ResourceSnapshot : "has"
+    Booking ||--o{ ConflictDetail : "has"
     Booking }o--|| CostCenter : "belongs to"
     Booking }o--|| RecurringRule : "follows"
     Equipment ||--o{ EquipmentLog : "tracks"
+    SwapHistory }o--|| ResourceSnapshot : "from"
+    SwapHistory }o--|| ResourceSnapshot : "to"
 
     Room {
         string id PK
@@ -294,6 +386,56 @@ erDiagram
         string operatorId
         string timestamp
         string detail
+    }
+
+    SwapHistory {
+        string id PK
+        string bookingId FK
+        string fromRoomId FK
+        string toRoomId FK
+        string reason
+        string operatorId
+        string triggerType
+        string resourceDiff
+        string fromSnapshotId FK
+        string toSnapshotId FK
+        string timestamp
+    }
+
+    ResourceSnapshot {
+        string id PK
+        string bookingId FK
+        string roomId
+        string roomName
+        int roomCapacity
+        string roomFloor
+        float roomCostPerHour
+        int setupBufferMinutes
+        string equipmentIds
+        string equipmentNames
+        string costCenterId
+        string costCenterName
+        boolean hasVisitors
+        int visitorCount
+        boolean teaBreakNeeded
+        string meetingLevel
+        int attendeeCount
+        string snapshotType
+        string createdAt
+    }
+
+    ConflictDetail {
+        string id PK
+        string bookingId FK
+        string type
+        string severity
+        string title
+        string description
+        string relatedBookingId
+        string relatedResourceId
+        string relatedResourceType
+        string resolutionSuggestion
+        string createdAt
     }
 ```
 
@@ -444,7 +586,48 @@ CREATE TABLE swap_history (
   to_room_id TEXT NOT NULL,
   reason TEXT,
   operator_id TEXT NOT NULL,
-  timestamp TEXT DEFAULT (datetime('now'))
+  trigger_type TEXT DEFAULT 'manual',
+  resource_diff TEXT,
+  from_snapshot_id TEXT,
+  to_snapshot_id TEXT,
+  timestamp TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (booking_id) REFERENCES bookings(id)
+);
+
+CREATE TABLE resource_snapshots (
+  id TEXT PRIMARY KEY,
+  booking_id TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  room_name TEXT,
+  room_capacity INTEGER,
+  room_floor TEXT,
+  room_cost_per_hour REAL,
+  setup_buffer_minutes INTEGER,
+  equipment_ids TEXT,
+  equipment_names TEXT,
+  cost_center_id TEXT,
+  cost_center_name TEXT,
+  has_visitors INTEGER DEFAULT 0,
+  visitor_count INTEGER DEFAULT 0,
+  tea_break_needed INTEGER DEFAULT 0,
+  meeting_level TEXT,
+  attendee_count INTEGER,
+  snapshot_type TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE conflict_details (
+  id TEXT PRIMARY KEY,
+  booking_id TEXT,
+  type TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  related_booking_id TEXT,
+  related_resource_id TEXT,
+  related_resource_type TEXT,
+  resolution_suggestion TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE users (
@@ -462,4 +645,8 @@ CREATE INDEX idx_bookings_recurring ON bookings(recurring_parent_id);
 CREATE INDEX idx_visitors_booking ON visitors(booking_id);
 CREATE INDEX idx_equipment_status ON equipment(status);
 CREATE INDEX idx_booking_logs_booking ON booking_logs(booking_id);
+CREATE INDEX idx_swap_history_booking ON swap_history(booking_id);
+CREATE INDEX idx_resource_snapshots_booking ON resource_snapshots(booking_id);
+CREATE INDEX idx_conflict_details_booking ON conflict_details(booking_id);
+CREATE INDEX idx_conflict_details_type ON conflict_details(type);
 ```

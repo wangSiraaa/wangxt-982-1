@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
-import { Wrench, ArrowRight, ArrowLeft, AlertTriangle, Package } from 'lucide-react'
-import { useStore, apiPost, apiFetch, type Equipment, type Booking } from '@/store'
+import { Wrench, ArrowRight, ArrowLeft, AlertTriangle, Package, Lightbulb, ArrowRightLeft, ChevronDown, ChevronRight, RefreshCw, Check, X } from 'lucide-react'
+import { format, parseISO } from 'date-fns'
+import { useStore, apiPost, apiFetch, type Equipment, type Booking, type Room } from '@/store'
 
 const columns = [
   { key: 'normal', label: '正常', color: 'bg-green-50 border-green-200' },
@@ -73,9 +74,15 @@ function EquipmentCard({
   )
 }
 
-function AffectedBookingsPanel({ equipmentId, onClose }: { equipmentId: string; onClose: () => void }) {
+function AffectedBookingsPanel({ equipmentId, onClose, triggerType }: { equipmentId: string; onClose: () => void; triggerType: 'faulty' | 'maintenance' }) {
   const [bookings, setBookings] = useState<Booking[]>([])
   const [loading, setLoading] = useState(true)
+  const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null)
+  const [suggestionsMap, setSuggestionsMap] = useState<Record<string, any[]>>({})
+  const [loadingSuggestion, setLoadingSuggestion] = useState<string | null>(null)
+  const currentUser = useStore((s) => s.currentUser)
+  const addNotification = useStore((s) => s.addNotification)
+  const fetchBookings = useStore((s) => s.fetchBookings)
 
   useEffect(() => {
     apiFetch<Booking[]>(`/api/equipment/${equipmentId}/affected-bookings`)
@@ -84,8 +91,45 @@ function AffectedBookingsPanel({ equipmentId, onClose }: { equipmentId: string; 
       .finally(() => setLoading(false))
   }, [equipmentId])
 
+  const loadSuggestions = async (bookingId: string) => {
+    if (suggestionsMap[bookingId]) {
+      setExpandedBookingId(expandedBookingId === bookingId ? null : bookingId)
+      return
+    }
+    setLoadingSuggestion(bookingId)
+    try {
+      const data = await apiPost<any[]>('/api/bookings/suggest-swap', {
+        bookingId,
+        excludeEquipmentId: equipmentId,
+      })
+      setSuggestionsMap(prev => ({ ...prev, [bookingId]: data }))
+      setExpandedBookingId(bookingId)
+    } catch (err: any) {
+      addNotification(err.message, 'error')
+    } finally {
+      setLoadingSuggestion(null)
+    }
+  }
+
+  const handleSwap = async (bookingId: string, targetRoomId: string) => {
+    try {
+      await apiPost('/api/bookings/swap-room', {
+        bookingId,
+        targetRoomId,
+        operatorId: currentUser?.id,
+        reason: triggerType === 'faulty' ? '设备故障迁移' : '设备维修迁移',
+        triggerType: triggerType === 'faulty' ? 'equipment_fault' : 'equipment_maintenance',
+      })
+      addNotification('迁移成功', 'success')
+      setSuggestionsMap(prev => ({ ...prev, [bookingId]: [] }))
+      fetchBookings({ date: format(new Date(), 'yyyy-MM-dd') })
+    } catch (err: any) {
+      addNotification(err.message, 'error')
+    }
+  }
+
   return (
-    <div className="bg-white rounded-lg border border-red-200 p-4 animate-slideUp">
+    <div className="bg-white rounded-lg border border-red-200 p-4 animate-slideUp max-h-[calc(100vh-200px)] overflow-y-auto">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-semibold text-red-700 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" />
@@ -93,18 +137,93 @@ function AffectedBookingsPanel({ equipmentId, onClose }: { equipmentId: string; 
         </h4>
         <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-sm">×</button>
       </div>
+
       {loading ? (
         <div className="text-sm text-slate-400">加载中...</div>
       ) : bookings.length === 0 ? (
-        <div className="text-sm text-slate-400">无受影响预订</div>
+        <div className="text-sm text-slate-400 flex items-center gap-2">
+          <Check className="w-4 h-4 text-green-500" />
+          无受影响预订
+        </div>
       ) : (
         <div className="space-y-2">
           {bookings.map((b) => (
-            <div key={b.id} className="text-xs p-2 bg-red-50 rounded text-red-700">
-              <div className="font-medium">{b.title}</div>
-              <div>{b.start_time} - {b.end_time}</div>
+            <div key={b.id} className="text-xs border border-red-100 rounded-lg overflow-hidden">
+              <div
+                className="p-2 bg-red-50 cursor-pointer hover:bg-red-100 transition-colors flex items-center justify-between"
+                onClick={() => loadSuggestions(b.id)}
+              >
+                <div className="flex-1">
+                  <div className="font-medium text-red-700">{b.title}</div>
+                  <div className="text-red-500 text-[11px]">
+                    {format(parseISO(b.start_time), 'MM/dd HH:mm')} - {format(parseISO(b.end_time), 'HH:mm')}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  {loadingSuggestion === b.id ? (
+                    <RefreshCw className="w-3.5 h-3.5 text-slate-400 animate-spin" />
+                  ) : (
+                    <>
+                      <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                      {expandedBookingId === b.id ? (
+                        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                      ) : (
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {expandedBookingId === b.id && suggestionsMap[b.id] && (
+                <div className="p-2 border-t border-red-100 bg-white space-y-1.5">
+                  <div className="text-[10px] text-slate-500 font-medium">推荐替代房间</div>
+                  {suggestionsMap[b.id].length === 0 ? (
+                    <div className="text-[11px] text-amber-600 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3" />
+                      暂无可用替代房间
+                    </div>
+                  ) : (
+                    suggestionsMap[b.id].slice(0, 3).map((room: any) => (
+                      <div key={room.id} className="flex items-center justify-between p-1.5 bg-slate-50 rounded">
+                        <div>
+                          <div className="text-[11px] font-medium text-slate-700">{room.name}</div>
+                          <div className="text-[10px] text-slate-500 flex items-center gap-1">
+                            <span>{room.capacity}人</span>
+                            <span>·</span>
+                            <span>{room.floor}层</span>
+                            {room.matchScore !== undefined && (
+                              <>
+                                <span>·</span>
+                                <span className={room.matchScore >= 80 ? 'text-green-600' : room.matchScore >= 60 ? 'text-amber-600' : 'text-red-600'}>
+                                  匹配{room.matchScore}%
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleSwap(b.id, room.id)}
+                          className="flex items-center gap-0.5 px-2 py-1 bg-amber-500 text-white rounded text-[10px] hover:bg-amber-600"
+                        >
+                          <ArrowRightLeft className="w-3 h-3" />
+                          迁移
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           ))}
+        </div>
+      )}
+
+      {bookings.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-red-100">
+          <div className="text-[11px] text-slate-500">
+            共 <span className="font-medium text-red-600">{bookings.length}</span> 个预订受影响
+          </div>
         </div>
       )}
     </div>
@@ -120,6 +239,7 @@ export default function EquipmentPage() {
   const loading = useStore((s) => s.loading)
 
   const [affectedEqId, setAffectedEqId] = useState<string | null>(null)
+  const [affectedTrigger, setAffectedTrigger] = useState<'faulty' | 'maintenance'>('faulty')
 
   useEffect(() => { fetchEquipment() }, [])
 
@@ -138,6 +258,8 @@ export default function EquipmentPage() {
       if (action === 'maintenance') {
         await apiPost(`/api/equipment/${eq.id}/maintenance`, { operatorId: currentUser?.id, note: '设备维修中' })
         addNotification(`${eq.name} 已标记为维修`, 'warning')
+        setAffectedEqId(eq.id)
+        setAffectedTrigger('maintenance')
       } else if (action === 'borrow') {
         await apiPost(`/api/equipment/${eq.id}/borrow`, { operatorId: currentUser?.id, borrowerId: currentUser?.id })
         addNotification(`${eq.name} 已借出`, 'info')
@@ -151,6 +273,7 @@ export default function EquipmentPage() {
         await apiPost(`/api/equipment/${eq.id}/maintenance`, { operatorId: currentUser?.id, note: '设备故障', status: 'faulty' })
         addNotification(`${eq.name} 已标记故障`, 'error')
         setAffectedEqId(eq.id)
+        setAffectedTrigger('faulty')
       }
       fetchEquipment()
     } catch (err: any) {
@@ -187,8 +310,8 @@ export default function EquipmentPage() {
         </div>
 
         {affectedEqId && (
-          <div className="w-72 shrink-0">
-            <AffectedBookingsPanel equipmentId={affectedEqId} onClose={() => setAffectedEqId(null)} />
+          <div className="w-80 shrink-0">
+            <AffectedBookingsPanel equipmentId={affectedEqId} onClose={() => setAffectedEqId(null)} triggerType={affectedTrigger} />
           </div>
         )}
       </div>
