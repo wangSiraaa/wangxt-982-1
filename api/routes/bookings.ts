@@ -81,6 +81,10 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
       res.status(400).json({ success: false, error: `参会人数(${attendeeCount})超过会议室容量(${room.capacity})` }); return
     }
 
+    if (attendeeCount > 10 && (!attendeeList || !Array.isArray(attendeeList) || attendeeList.length === 0)) {
+      res.status(400).json({ success: false, error: `参会人数(${attendeeCount})超过10人，必须提供参会人员名单` }); return
+    }
+
     if (equipmentIds && Array.isArray(equipmentIds) && equipmentIds.length > 0) {
       const roomEqTypes = queryAll(
         `SELECT e.type FROM equipment e JOIN room_equipment re ON e.id = re.equipment_id WHERE re.room_id = ?`,
@@ -219,6 +223,16 @@ router.put('/:id', async (req: Request, res: Response): Promise<void> => {
       const room = queryOne(`SELECT * FROM rooms WHERE id = ?`, [existing.room_id])
       if (room && attendeeCount > room.capacity) {
         res.status(400).json({ success: false, error: `参会人数(${attendeeCount})超过会议室容量(${room.capacity})` }); return
+      }
+      if (attendeeCount > 10) {
+        const currentList = existing.attendee_list ? JSON.parse(existing.attendee_list) : null
+        const newAttendeeList = req.body.attendeeList !== undefined ? req.body.attendeeList : currentList
+        if (!newAttendeeList || !Array.isArray(newAttendeeList) || newAttendeeList.length === 0) {
+          res.status(400).json({ success: false, error: `参会人数(${attendeeCount})超过10人，必须提供参会人员名单` }); return
+        }
+        if (req.body.attendeeList !== undefined) {
+          run(`UPDATE bookings SET attendee_list=?, updated_at=datetime('now') WHERE id=?`, [JSON.stringify(req.body.attendeeList), req.params.id])
+        }
       }
       run(`UPDATE bookings SET attendee_count=?, updated_at=datetime('now') WHERE id=?`, [attendeeCount, req.params.id])
     }

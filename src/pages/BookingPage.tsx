@@ -131,7 +131,7 @@ export default function BookingPage() {
       items.push({ type: 'VIP会议', message: 'VIP会议需要审批通过后才生效', severity: 'warning' })
     }
     if (form.attendeeCount > 10 && !form.attendeeList.trim()) {
-      items.push({ type: '参会人员', message: '超过10人的会议请填写参会人员名单', severity: 'warning' })
+      items.push({ type: '参会人员名单缺失', message: `参会人数(${form.attendeeCount})超过10人，必须填写参会人员名单后才能提交`, severity: 'error' })
     }
     if (form.isRecurring && !form.recurringEndDate) {
       items.push({ type: '周期会议', message: '请设置周期结束日期', severity: 'error' })
