@@ -306,6 +306,7 @@ function SwapTab() {
   const [resourceSnapshots, setResourceSnapshots] = useState<any[]>([])
   const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null)
   const [swapReason, setSwapReason] = useState('')
+  const [showSwapResult, setShowSwapResult] = useState<{ resourceDiff: ResourceDiff; swapHistory: any[] } | null>(null)
 
   const activeBookings = bookings.filter((b) => !['cancelled', 'rejected'].includes(b.status))
 
@@ -353,13 +354,20 @@ function SwapTab() {
   async function handleSwap(targetRoomId: string) {
     const reason = swapReason || '手动换房'
     try {
-      await apiPost('/api/bookings/swap-room', {
+      const result = await apiPost<any>('/api/bookings/swap-room', {
         bookingId: selectedBookingId,
         targetRoomId,
         operatorId: currentUser?.id,
         reason,
         triggerType: 'manual',
       })
+
+      if (result.resourceDiff && result.swapHistory) {
+        setShowSwapResult({ resourceDiff: result.resourceDiff, swapHistory: result.swapHistory })
+        setSwapHistory(result.swapHistory)
+        setResourceSnapshots(result.snapshots || [])
+      }
+
       addNotification('换房成功', 'success')
       setSwapReason('')
       setSelectedSuggestion(null)
@@ -376,6 +384,56 @@ function SwapTab() {
 
   return (
     <div className="space-y-4">
+      {showSwapResult && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6 animate-slideUp">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <Check className="w-5 h-5 text-green-500" />
+                换房成功
+              </h3>
+              <button
+                onClick={() => setShowSwapResult(null)}
+                className="text-slate-400 hover:text-slate-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-slate-700 mb-3">资源差异对比</h4>
+              <ResourceDiffView diff={showSwapResult.resourceDiff} />
+            </div>
+
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-slate-700 mb-2">迁移历史</h4>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {showSwapResult.swapHistory.slice(0, 3).map((h: any, i: number) => (
+                  <div key={i} className="text-xs p-2 bg-slate-50 rounded">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-slate-700">
+                        {h.from_room_name} → {h.to_room_name}
+                      </span>
+                      <span className="text-slate-500">
+                        {format(parseISO(h.timestamp), 'MM/dd HH:mm')}
+                      </span>
+                    </div>
+                    {h.reason && <div className="text-slate-500 mt-0.5">{h.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowSwapResult(null)}
+              className="w-full py-2 bg-teal-700 text-white rounded-lg text-sm hover:bg-teal-800"
+            >
+              确认
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-lg border border-slate-200 p-4">
         <div className="flex gap-3 items-end">
           <div className="flex-1">

@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import { Wrench, ArrowRight, ArrowLeft, AlertTriangle, Package, Lightbulb, ArrowRightLeft, ChevronDown, ChevronRight, RefreshCw, Check, X } from 'lucide-react'
 import { format, parseISO } from 'date-fns'
-import { useStore, apiPost, apiFetch, type Equipment, type Booking, type Room } from '@/store'
+import { useStore, apiPost, apiFetch, type Equipment, type Booking, type Room, type ResourceDiff } from '@/store'
 
 const columns = [
   { key: 'normal', label: '正常', color: 'bg-green-50 border-green-200' },
@@ -74,12 +74,98 @@ function EquipmentCard({
   )
 }
 
+function ResourceDiffView({ diff }: { diff: ResourceDiff }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-700">整体匹配度</span>
+        <div className="flex items-center gap-2">
+          <div className="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full ${diff.overallMatchScore >= 80 ? 'bg-green-500' : diff.overallMatchScore >= 60 ? 'bg-amber-500' : 'bg-red-500'}`}
+              style={{ width: `${diff.overallMatchScore}%` }}
+            />
+          </div>
+          <span className={`text-sm font-bold ${diff.overallMatchScore >= 80 ? 'text-green-600' : diff.overallMatchScore >= 60 ? 'text-amber-600' : 'text-red-600'}`}>
+            {diff.overallMatchScore}%
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">容量变化</div>
+          <div className="font-medium text-slate-700">
+            {diff.room.capacity.before} → {diff.room.capacity.after}
+            {diff.room.capacity.changed && (
+              <span className={`ml-1 text-xs ${diff.room.capacity.diff > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                ({diff.room.capacity.diff > 0 ? '+' : ''}{diff.room.capacity.diff})
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">楼层变化</div>
+          <div className="font-medium text-slate-700">
+            {diff.room.floor.before} → {diff.room.floor.after}层
+          </div>
+        </div>
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">费用变化</div>
+          <div className={`font-medium ${diff.cost.totalCost.diff > 0 ? 'text-red-600' : diff.cost.totalCost.diff < 0 ? 'text-green-600' : 'text-slate-700'}`}>
+            ¥{diff.cost.totalCost.before} → ¥{diff.cost.totalCost.after}
+            {diff.cost.totalCost.changed && (
+              <span className="text-xs ml-1">
+                ({diff.cost.totalCost.diff > 0 ? '+' : ''}¥{diff.cost.totalCost.diff})
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {diff.equipment.changed && (
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-2">设备变化</div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {diff.equipment.added.length > 0 && (
+              <div className="flex items-center gap-1">
+                <span className="text-green-600">新增:</span>
+                {diff.equipment.added.map((e, i) => (
+                  <span key={i} className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded">{e}</span>
+                ))}
+              </div>
+            )}
+            {diff.equipment.removed.length > 0 && (
+              <div className="flex items-center gap-1">
+                <span className="text-red-600">减少:</span>
+                {diff.equipment.removed.map((e, i) => (
+                  <span key={i} className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded">{e}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {diff.layout.changed && (
+        <div className="p-2 bg-slate-50 rounded">
+          <div className="text-xs text-slate-500 mb-1">布局变化</div>
+          <div className="text-sm font-medium text-slate-700">
+            {diff.layout.before} → {diff.layout.after}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AffectedBookingsPanel({ equipmentId, onClose, triggerType }: { equipmentId: string; onClose: () => void; triggerType: 'faulty' | 'maintenance' }) {
   const [bookings, setBookings] = useState<Booking[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null)
   const [suggestionsMap, setSuggestionsMap] = useState<Record<string, any[]>>({})
   const [loadingSuggestion, setLoadingSuggestion] = useState<string | null>(null)
+  const [showSwapResult, setShowSwapResult] = useState<{ resourceDiff: ResourceDiff; swapHistory: any[] } | null>(null)
   const currentUser = useStore((s) => s.currentUser)
   const addNotification = useStore((s) => s.addNotification)
   const fetchBookings = useStore((s) => s.fetchBookings)
@@ -113,13 +199,18 @@ function AffectedBookingsPanel({ equipmentId, onClose, triggerType }: { equipmen
 
   const handleSwap = async (bookingId: string, targetRoomId: string) => {
     try {
-      await apiPost('/api/bookings/swap-room', {
+      const result = await apiPost<any>('/api/bookings/swap-room', {
         bookingId,
         targetRoomId,
         operatorId: currentUser?.id,
         reason: triggerType === 'faulty' ? '设备故障迁移' : '设备维修迁移',
         triggerType: triggerType === 'faulty' ? 'equipment_fault' : 'equipment_maintenance',
       })
+
+      if (result.resourceDiff && result.swapHistory) {
+        setShowSwapResult({ resourceDiff: result.resourceDiff, swapHistory: result.swapHistory })
+      }
+
       addNotification('迁移成功', 'success')
       setSuggestionsMap(prev => ({ ...prev, [bookingId]: [] }))
       fetchBookings({ date: format(new Date(), 'yyyy-MM-dd') })
@@ -129,6 +220,57 @@ function AffectedBookingsPanel({ equipmentId, onClose, triggerType }: { equipmen
   }
 
   return (
+    <>
+      {showSwapResult && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6 animate-slideUp">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <Check className="w-5 h-5 text-green-500" />
+                迁移成功
+              </h3>
+              <button
+                onClick={() => setShowSwapResult(null)}
+                className="text-slate-400 hover:text-slate-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-slate-700 mb-3">资源差异对比</h4>
+              <ResourceDiffView diff={showSwapResult.resourceDiff} />
+            </div>
+
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-slate-700 mb-2">迁移历史</h4>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {showSwapResult.swapHistory.slice(0, 3).map((h: any, i: number) => (
+                  <div key={i} className="text-xs p-2 bg-slate-50 rounded">
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-slate-700">
+                        {h.from_room_name} → {h.to_room_name}
+                      </span>
+                      <span className="text-slate-500">
+                        {format(parseISO(h.timestamp), 'MM/dd HH:mm')}
+                      </span>
+                    </div>
+                    {h.reason && <div className="text-slate-500 mt-0.5">{h.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowSwapResult(null)}
+              className="w-full py-2 bg-teal-700 text-white rounded-lg text-sm hover:bg-teal-800"
+            >
+              确认
+            </button>
+          </div>
+        </div>
+      )}
+
     <div className="bg-white rounded-lg border border-red-200 p-4 animate-slideUp max-h-[calc(100vh-200px)] overflow-y-auto">
       <div className="flex items-center justify-between mb-3">
         <h4 className="text-sm font-semibold text-red-700 flex items-center gap-2">
@@ -227,6 +369,7 @@ function AffectedBookingsPanel({ equipmentId, onClose, triggerType }: { equipmen
         </div>
       )}
     </div>
+    </>
   )
 }
 

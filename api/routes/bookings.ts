@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express'
-import { queryAll, queryOne, run } from '../database.js'
+import { queryAll, queryOne, run, beginTransaction, commitTransaction, rollbackTransaction, runInTransaction } from '../database.js'
 import { v4 as uuidv4 } from 'uuid'
 import { differenceInMinutes, addMinutes, parseISO, format, isBefore, isAfter } from 'date-fns'
 
@@ -438,6 +438,11 @@ router.post('/:id/vip-preempt', async (req: Request, res: Response): Promise<voi
       res.status(400).json({ success: false, error: '无法抢占VIP会议' }); return
     }
 
+    const validBookerId = bookerId || booking.booker_id
+    if (!validBookerId) {
+      res.status(400).json({ success: false, error: '操作人不能为空，请先登录' }); return
+    }
+
     const currentRoom = queryOne(`SELECT * FROM rooms WHERE id = ?`, [booking.room_id])
     if (!currentRoom) { res.status(400).json({ success: false, error: '会议室不存在' }); return }
 
@@ -448,31 +453,38 @@ router.post('/:id/vip-preempt', async (req: Request, res: Response): Promise<voi
       currentRoom.id
     )
 
-    const swapId = uuidv4()
-    if (suggestedRoom) {
-      run(`INSERT INTO swap_history (id, booking_id, from_room_id, to_room_id, reason, operator_id) VALUES (?, ?, ?, ?, ?, ?)`,
-        [swapId, booking.id, booking.room_id, suggestedRoom.id, 'VIP优先抢占', bookerId])
-      run(`UPDATE bookings SET room_id=?, updated_at=datetime('now') WHERE id=?`, [suggestedRoom.id, booking.id])
-      logBookingAction(booking.id, 'swapped', bookerId, `VIP抢占，原会议换至${suggestedRoom.name}`)
-    } else {
-      run(`UPDATE bookings SET status='cancelled', updated_at=datetime('now') WHERE id=?`, [booking.id])
-      logBookingAction(booking.id, 'cancelled', bookerId, 'VIP抢占，无可用会议室，原预订取消')
-    }
+    const result = runInTransaction(() => {
+      let swappedToRoomName: string | null = null
 
-    const newBookingId = uuidv4()
-    const room = queryOne(`SELECT * FROM rooms WHERE id = ?`, [booking.room_id])
-    const bufferMinutes = room?.setup_buffer_minutes || 0
-    const setupStartTime = addMinutes(parseISO(booking.start_time), -bufferMinutes).toISOString().replace('Z', '')
-    const teardownEndTime = addMinutes(parseISO(booking.end_time), bufferMinutes).toISOString().replace('Z', '')
+      const swapId = uuidv4()
+      if (suggestedRoom) {
+        run(`INSERT INTO swap_history (id, booking_id, from_room_id, to_room_id, reason, operator_id, trigger_type) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [swapId, booking.id, booking.room_id, suggestedRoom.id, 'VIP优先抢占', validBookerId, 'vip_preempt'])
+        run(`UPDATE bookings SET room_id=?, updated_at=datetime('now') WHERE id=?`, [suggestedRoom.id, booking.id])
+        logBookingAction(booking.id, 'swapped', validBookerId, `VIP抢占，原会议换至${suggestedRoom.name}`)
+        swappedToRoomName = suggestedRoom.name
+      } else {
+        run(`UPDATE bookings SET status='cancelled', updated_at=datetime('now') WHERE id=?`, [booking.id])
+        logBookingAction(booking.id, 'cancelled', validBookerId, 'VIP抢占，无可用会议室，原预订取消')
+      }
 
-    run(
-      `INSERT INTO bookings (id, room_id, booker_id, title, start_time, end_time, setup_start_time, teardown_end_time, attendee_count, meeting_level, cost_center_id, has_visitors, status, front_desk_confirmed, security_approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newBookingId, booking.room_id, bookerId, title, booking.start_time, booking.end_time,
-        setupStartTime, teardownEndTime, 1, meetingLevel, null, 0, 'confirmed', 0, 0]
-    )
-    logBookingAction(newBookingId, 'created', bookerId, 'VIP抢占创建新预订')
+      const newBookingId = uuidv4()
+      const room = queryOne(`SELECT * FROM rooms WHERE id = ?`, [booking.room_id])
+      const bufferMinutes = room?.setup_buffer_minutes || 0
+      const setupStartTime = addMinutes(parseISO(booking.start_time), -bufferMinutes).toISOString().replace('Z', '')
+      const teardownEndTime = addMinutes(parseISO(booking.end_time), bufferMinutes).toISOString().replace('Z', '')
 
-    res.json({ success: true, data: { newBookingId, displacedBookingId: booking.id, swappedToRoom: suggestedRoom?.name || null } })
+      run(
+        `INSERT INTO bookings (id, room_id, booker_id, title, start_time, end_time, setup_start_time, teardown_end_time, attendee_count, meeting_level, cost_center_id, has_visitors, status, front_desk_confirmed, security_approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [newBookingId, booking.room_id, validBookerId, title, booking.start_time, booking.end_time,
+          setupStartTime, teardownEndTime, 1, meetingLevel, null, 0, 'confirmed', 0, 0]
+      )
+      logBookingAction(newBookingId, 'created', validBookerId, 'VIP抢占创建新预订')
+
+      return { newBookingId, displacedBookingId: booking.id, swappedToRoomName }
+    })
+
+    res.json({ success: true, data: result })
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message })
   }
@@ -502,40 +514,68 @@ router.post('/swap-room', async (req: Request, res: Response): Promise<void> => 
       res.status(409).json({ success: false, error: '目标会议室该时段已被占用', data: conflicts }); return
     }
 
+    const validOperatorId = operatorId || booking.booker_id
+    if (!validOperatorId) {
+      res.status(400).json({ success: false, error: '操作人不能为空，请先登录' }); return
+    }
+
     const fromRoomId = booking.room_id
     const fromRoom = queryOne(`SELECT * FROM rooms WHERE id = ?`, [fromRoomId])
     const bufferMinutes = targetRoom.setup_buffer_minutes || 0
     const setupStartTime = addMinutes(parseISO(booking.start_time), -bufferMinutes).toISOString().replace('Z', '')
     const teardownEndTime = addMinutes(parseISO(booking.end_time), bufferMinutes).toISOString().replace('Z', '')
 
-    const fromSnapshotId = createResourceSnapshot(bookingId, fromRoom, booking, 'before_swap')
-    const toSnapshotId = createResourceSnapshot(bookingId, targetRoom, booking, 'after_swap')
+    const result = runInTransaction(() => {
+      const fromSnapshotId = createResourceSnapshot(bookingId, fromRoom, booking, 'before_swap')
+      const toSnapshotId = createResourceSnapshot(bookingId, targetRoom, booking, 'after_swap')
 
-    const resourceDiff = calculateResourceDiff(fromRoom, targetRoom, booking, booking)
+      const resourceDiff = calculateResourceDiff(fromRoom, targetRoom, booking, booking)
 
-    run(`UPDATE bookings SET room_id=?, setup_start_time=?, teardown_end_time=?, updated_at=datetime('now') WHERE id=?`,
-      [targetRoomId, setupStartTime, teardownEndTime, bookingId])
+      run(`UPDATE bookings SET room_id=?, setup_start_time=?, teardown_end_time=?, updated_at=datetime('now') WHERE id=?`,
+        [targetRoomId, setupStartTime, teardownEndTime, bookingId])
 
-    const swapId = uuidv4()
-    run(
-      `INSERT INTO swap_history (id, booking_id, from_room_id, to_room_id, reason, operator_id, trigger_type, resource_diff, from_snapshot_id, to_snapshot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [swapId, bookingId, fromRoomId, targetRoomId, reason || '手动换房', operatorId, triggerType, JSON.stringify(resourceDiff), fromSnapshotId, toSnapshotId]
+      const swapId = uuidv4()
+      run(
+        `INSERT INTO swap_history (id, booking_id, from_room_id, to_room_id, reason, operator_id, trigger_type, resource_diff, from_snapshot_id, to_snapshot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [swapId, bookingId, fromRoomId, targetRoomId, reason || '手动换房', validOperatorId, triggerType, JSON.stringify(resourceDiff), fromSnapshotId, toSnapshotId]
+      )
+
+      if (booking.cost_center_id && fromRoom && targetRoom) {
+        const durationHours = differenceInMinutes(parseISO(booking.end_time), parseISO(booking.start_time)) / 60
+        const oldCost = durationHours * (fromRoom.cost_per_hour || 0)
+        const newCost = durationHours * (targetRoom.cost_per_hour || 0)
+        const costDiff = newCost - oldCost
+        if (costDiff !== 0) {
+          run(`UPDATE cost_centers SET used = used + ? WHERE id = ?`, [costDiff, booking.cost_center_id])
+        }
+      }
+
+      logBookingAction(bookingId, 'swapped', validOperatorId, `换房: 从${fromRoom?.name || fromRoomId}换至${targetRoom.name}`)
+
+      const updatedBooking = queryOne(`SELECT * FROM bookings WHERE id = ?`, [bookingId])
+      return { booking: updatedBooking, swapId, resourceDiff, fromSnapshotId, toSnapshotId }
+    })
+
+    const swapHistory = queryAll(
+      `SELECT sh.*, r1.name as from_room_name, r2.name as to_room_name
+       FROM swap_history sh
+       LEFT JOIN rooms r1 ON sh.from_room_id = r1.id
+       LEFT JOIN rooms r2 ON sh.to_room_id = r2.id
+       WHERE sh.booking_id = ? ORDER BY sh.timestamp DESC`,
+      [bookingId]
     )
-
-    if (booking.cost_center_id && fromRoom && targetRoom) {
-      const durationHours = differenceInMinutes(parseISO(booking.end_time), parseISO(booking.start_time)) / 60
-      const oldCost = durationHours * (fromRoom.cost_per_hour || 0)
-      const newCost = durationHours * (targetRoom.cost_per_hour || 0)
-      const costDiff = newCost - oldCost
-      if (costDiff !== 0) {
-        run(`UPDATE cost_centers SET used = used + ? WHERE id = ?`, [costDiff, booking.cost_center_id])
+    for (const h of swapHistory) {
+      if (h.resource_diff) {
+        try { h.resource_diff = JSON.parse(h.resource_diff) } catch (e) {}
       }
     }
 
-    logBookingAction(bookingId, 'swapped', operatorId, `换房: 从${fromRoom?.name || fromRoomId}换至${targetRoom.name}`)
+    const snapshots = queryAll(
+      `SELECT * FROM resource_snapshots WHERE booking_id = ? ORDER BY created_at DESC`,
+      [bookingId]
+    )
 
-    const result = queryOne(`SELECT * FROM bookings WHERE id = ?`, [bookingId])
-    res.json({ success: true, data: { booking: result, swapId, resourceDiff } })
+    res.json({ success: true, data: { ...result, swapHistory, snapshots } })
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message })
   }

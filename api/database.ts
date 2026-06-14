@@ -36,6 +36,33 @@ export function run(sql: string, params?: any[]): void {
   database.run(sql, params)
 }
 
+export function beginTransaction(): void {
+  const database = getDb()
+  database.run('BEGIN TRANSACTION')
+}
+
+export function commitTransaction(): void {
+  const database = getDb()
+  database.run('COMMIT TRANSACTION')
+}
+
+export function rollbackTransaction(): void {
+  const database = getDb()
+  database.run('ROLLBACK TRANSACTION')
+}
+
+export function runInTransaction<T>(fn: () => T): T {
+  beginTransaction()
+  try {
+    const result = fn()
+    commitTransaction()
+    return result
+  } catch (err) {
+    rollbackTransaction()
+    throw err
+  }
+}
+
 export async function initDatabase(): Promise<void> {
   const SQL = await initSqlJs()
   db = new SQL.Database()
